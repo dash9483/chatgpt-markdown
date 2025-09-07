@@ -1,7 +1,7 @@
 import json
 import os
 import argparse
-from datetime import datetime
+from datetime import datetime, timezone
 
 
 def sanitize_filename(filename):
@@ -13,8 +13,15 @@ def sanitize_filename(filename):
     return filename
 
 
-def get_conversation(node_id, mapping, list, last_author=None):
+def format_timestamp(ts):
+    """Convert UNIX timestamp to local ISO datetime string with offset."""
+    dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone()  # convert to local timezone
+    return dt.strftime("%Y-%m-%d %H:%M:%S %z")
+
+
+def get_conversation(node_id, mapping, collected, last_author=None):
     node = mapping[node_id]
+
     if node.get('message') and 'content' in node['message'] and 'parts' in node['message']['content']:
         content_parts = node['message']['content']['parts']
         parts_text = []
@@ -23,16 +30,21 @@ def get_conversation(node_id, mapping, list, last_author=None):
                 parts_text.append(part)
             elif isinstance(part, dict):
                 parts_text.append(str(part))
+
         if parts_text:
             author_role = node['message']['author']['role']
+            ts = node['message'].get('create_time')
+            timestamp_line = f"Date: {format_timestamp(ts)}" if ts else "Date: unknown"
+
             if author_role != "system" and author_role != last_author:
-                list.append(f"## {author_role}\n{''.join(parts_text)}")
+                collected.append(f"## {author_role}\n\n{timestamp_line}\n\n{''.join(parts_text)}")
             elif author_role != "system":
-                list.append(f"{''.join(parts_text)}")
+                collected.append(f"\n{timestamp_line}\n\n{''.join(parts_text)}")
+
             last_author = author_role
 
     for child_id in node.get('children', []):
-        get_conversation(child_id, mapping, list, last_author)
+        get_conversation(child_id, mapping, collected, last_author)
 
 
 def generate_unique_filename(base_path, title, date_prefix):
@@ -73,8 +85,8 @@ def main(input_file, output_dir, use_date_folders):
                 node_id for node_id, node in item['mapping'].items()
                 if node.get('parent') is None
             )
-            list = []
-            get_conversation(root_node_id, item['mapping'], list)
+            collected = []
+            get_conversation(root_node_id, item['mapping'], collected)
 
             if use_date_folders:
                 date_iso = datetime.fromtimestamp(item["create_time"]).date().isoformat()
@@ -87,7 +99,7 @@ def main(input_file, output_dir, use_date_folders):
 
             print(f"Attempting to write to: {file_path}")
             with open(file_path, 'w', encoding='utf-8') as outfile:
-                outfile.write('\n'.join(list))
+                outfile.write('\n\n'.join(collected))
 
 
 if __name__ == '__main__':
