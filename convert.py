@@ -3,6 +3,7 @@ import os
 import argparse
 from datetime import datetime
 
+
 def sanitize_filename(filename):
     if filename is None or filename.strip() == "":
         return "noname"
@@ -10,6 +11,7 @@ def sanitize_filename(filename):
     for char in invalid_characters:
         filename = filename.replace(char, '')
     return filename
+
 
 def get_conversation(node_id, mapping, list, last_author=None):
     node = mapping[node_id]
@@ -32,14 +34,20 @@ def get_conversation(node_id, mapping, list, last_author=None):
     for child_id in node.get('children', []):
         get_conversation(child_id, mapping, list, last_author)
 
-def generate_unique_filename(base_path, title):
+
+def generate_unique_filename(base_path, title, date_prefix):
     version = 0
     title = title if title.strip() != "" else "noname"
-    file_path = os.path.join(base_path, f"{title}.md")
+    base_name = f"{date_prefix} {title}.md"
+    file_path = os.path.join(base_path, base_name)
+
     while os.path.exists(file_path):
         version += 1
-        file_path = os.path.join(base_path, f"{title}_v{version}.md")
+        base_name = f"{date_prefix} {title}_v{version}.md"
+        file_path = os.path.join(base_path, base_name)
+
     return file_path
+
 
 def main(input_file, output_dir, use_date_folders):
     if not os.path.isdir(output_dir):
@@ -48,9 +56,23 @@ def main(input_file, output_dir, use_date_folders):
     with open(input_file, 'r', encoding='utf-8') as f:
         data = json.loads(f.read())
         for item in data:
-            title = item.get("title")
-            title = sanitize_filename(title)
-            root_node_id = next(node_id for node_id, node in item['mapping'].items() if node.get('parent') is None)
+            title = sanitize_filename(item.get("title"))
+
+            # Find last message create_time
+            timestamps = []
+            for node in item['mapping'].values():
+                if node.get('message') and node['message'].get('create_time'):
+                    timestamps.append(node['message']['create_time'])
+            if timestamps:
+                last_ts = max(timestamps)
+                date_prefix = datetime.fromtimestamp(last_ts).date().isoformat()
+            else:
+                date_prefix = "unknown-date"
+
+            root_node_id = next(
+                node_id for node_id, node in item['mapping'].items()
+                if node.get('parent') is None
+            )
             list = []
             get_conversation(root_node_id, item['mapping'], list)
 
@@ -59,13 +81,14 @@ def main(input_file, output_dir, use_date_folders):
                 date_folder = os.path.join(output_dir, date_iso)
                 if not os.path.isdir(date_folder):
                     os.makedirs(date_folder)
-                file_path = generate_unique_filename(date_folder, title)
+                file_path = generate_unique_filename(date_folder, title, date_prefix)
             else:
-                file_path = generate_unique_filename(output_dir, title)
+                file_path = generate_unique_filename(output_dir, title, date_prefix)
 
             print(f"Attempting to write to: {file_path}")
             with open(file_path, 'w', encoding='utf-8') as outfile:
                 outfile.write('\n'.join(list))
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Process conversation data.')
