@@ -48,23 +48,18 @@ def get_conversation(node_id, mapping, collected, last_author=None, visited=None
 
     msg = node.get("message")
     if msg and "content" in msg and "parts" in msg["content"]:
-        content_parts = msg["content"]["parts"]
-        parts_text = []
+        author_role = msg["author"]["role"]
 
-        for part in content_parts:
-            parts_text.append(clean_text(part))
+        # Skip system messages entirely
+        if author_role != "system":
+            content_parts = msg["content"]["parts"]
+            parts_text = [clean_text(part) for part in content_parts]
 
-        if parts_text:
-            author_role = msg["author"]["role"]
             ts = msg.get("create_time")
             timestamp_line = f"Date: {format_timestamp(ts)}" if ts else "Date: unknown"
 
             snippet = f"## {author_role}\n\n{timestamp_line}\n\n{''.join(parts_text)}"
-            if author_role != "system" and author_role != last_author:
-                collected.append(snippet)
-            elif author_role != "system":
-                collected.append(f"\n{timestamp_line}\n\n{''.join(parts_text)}")
-
+            collected.append(snippet)
             last_author = author_role
 
     # Recurse through children safely
@@ -121,12 +116,16 @@ def main(input_file, output_dir, use_date_folders):
         else:
             file_path = generate_unique_filename(output_dir, title, date_prefix)
 
-        # Add extra blank line after each snippet except the last
+        # Prepare output lines with spacing rules:
+        # 1. Blank line before each header except the first
+        # 2. Extra blank line after each snippet except the last
         output_lines = []
         for i, snippet in enumerate(collected):
+            if i != 0:
+                output_lines.append('')  # blank line before header
             output_lines.append(snippet)
             if i < len(collected) - 1:
-                output_lines.append('')  # extra blank line
+                output_lines.append('')  # extra blank line after snippet
 
         print(f"Attempting to write to: {file_path}")
         with open(file_path, 'w', encoding='utf-8') as outfile:
