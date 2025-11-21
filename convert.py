@@ -4,6 +4,9 @@ import re
 import argparse
 from datetime import datetime, timezone
 
+# ============================================================
+# Utilities
+# ============================================================
 
 def sanitize_filename(filename):
     if filename is None or filename.strip() == "":
@@ -20,37 +23,36 @@ def format_timestamp(ts):
     return dt.strftime("%Y-%m-%d %H:%M:%S %z")
 
 
+def format_timestamp_for_index(ts):
+    """Timestamp without timezone for clean index."""
+    dt = datetime.fromtimestamp(ts, tz=timezone.utc).astimezone()
+    return dt.strftime("%Y-%m-%d %H:%M")
+
+
 def clean_text(text):
     """
-    Preserve *everything* related to formatting:
+    Preserve everything:
+      - whitespace
       - code blocks
       - tables
-      - whitespace
       - indentation
       - blank lines
-      - preformatted text
-      - markdown structure
-
     Only remove placeholder references like "18 turn0search4".
     """
-
     if not isinstance(text, str):
         text = str(text)
 
-    # Remove placeholder IDs (but do NOT touch whitespace!)
     text = re.sub(r"\b\d+\s+turn\d+search\d+\b", "", text)
-
-    # Normalize line endings but preserve everything else
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-
-    # We do NOT modify whitespace or indentation at all
     return text
 
+# ============================================================
+# Gather conversation structure + navigation data
+# ============================================================
 
-def get_conversation(node_id, mapping, collected, last_author=None, visited=None):
+def get_conversation(node_id, mapping, collected, nav_list, counter, visited=None):
     if visited is None:
         visited = set()
-
     if node_id in visited:
         return
     visited.add(node_id)
@@ -61,27 +63,50 @@ def get_conversation(node_id, mapping, collected, last_author=None, visited=None
 
     msg = node.get("message")
     if msg and "content" in msg and "parts" in msg["content"]:
+
         author_role = msg["author"]["role"]
 
-        # Skip SYSTEM messages entirely
+        # Skip system messages
         if author_role != "system":
+
             content_parts = msg["content"]["parts"]
             parts_text = [clean_text(part) for part in content_parts]
 
             ts = msg.get("create_time")
             timestamp_line = f"Date: {format_timestamp(ts)}" if ts else "Date: unknown"
 
+            # Build anchor name
+            anchor = f"message-{counter[0]}--{author_role}"
+
+            # FIXED — remove invalid f-string from your version
+            safe_text = "".join(parts_text)
+
             snippet = (
+                f"<a id=\"{anchor}\"></a>\n"
                 f"## {author_role}\n\n"
                 f"{timestamp_line}\n\n"
-                f"{''.join(parts_text)}"
+                f"{safe_text}"
             )
 
             collected.append(snippet)
 
-    for child_id in node.get("children", []):
-        get_conversation(child_id, mapping, collected, visited=visited)
+            # Add navigation entry
+            if ts:
+                nav_list.append({
+                    "number": counter[0],
+                    "role": author_role,
+                    "ts": ts,
+                    "anchor": anchor
+                })
 
+            counter[0] += 1
+
+    for child_id in node.get("children", []):
+        get_conversation(child_id, mapping, collected, nav_list, counter, visited=visited)
+
+# ============================================================
+# File naming
+# ============================================================
 
 def generate_unique_filename(base_path, title, date_prefix):
     version = 0
@@ -96,8 +121,12 @@ def generate_unique_filename(base_path, title, date_prefix):
 
     return file_path
 
+# ============================================================
+# Main
+# ============================================================
 
 def main(input_file, output_dir, use_date_folders):
+
     if not os.path.isdir(output_dir):
         os.makedirs(output_dir)
 
@@ -105,6 +134,7 @@ def main(input_file, output_dir, use_date_folders):
         data = json.load(f)
 
     for item in data:
+
         title = sanitize_filename(item.get("title"))
 
         timestamps = [
@@ -112,19 +142,37 @@ def main(input_file, output_dir, use_date_folders):
             for node in item["mapping"].values()
             if node.get("message") and node["message"].get("create_time")
         ]
+
         date_prefix = (
             datetime.fromtimestamp(max(timestamps)).date().isoformat()
             if timestamps else "unknown-date"
         )
 
+        # Find root node
         root_node_id = next(
             node_id for node_id, node in item["mapping"].items()
             if node.get("parent") is None
         )
 
         collected = []
-        get_conversation(root_node_id, item["mapping"], collected)
+        nav_list = []
+        counter = [1]  # message counter
 
+        # Collect conversation & navigation
+        get_conversation(root_node_id, item["mapping"], collected, nav_list, counter)
+
+        # Build navigation index
+        nav_lines = ["# Thread Navigation Index", ""]
+        for entry in nav_list:
+            ts_clean = format_timestamp_for_index(entry["ts"])
+            nav_lines.append(
+                f"- [{ts_clean} — {entry['role']}](#{entry['anchor']})"
+            )
+        nav_lines.append("")
+        nav_lines.append("---")
+        nav_lines.append("")
+
+        # Folder setup
         if use_date_folders:
             date_iso = datetime.fromtimestamp(
                 item.get("create_time", 0)
@@ -132,28 +180,34 @@ def main(input_file, output_dir, use_date_folders):
             date_folder = os.path.join(output_dir, date_iso)
             if not os.path.isdir(date_folder):
                 os.makedirs(date_folder)
+
             file_path = generate_unique_filename(date_folder, title, date_prefix)
         else:
             file_path = generate_unique_filename(output_dir, title, date_prefix)
 
-        output_lines = []
+        # Output with 2 blank lines between snippets
+        output_lines = nav_lines[:]
+
         for i, snippet in enumerate(collected):
-            if i != 0:
-                output_lines.append("")  # blank line before header
             output_lines.append(snippet)
             if i < len(collected) - 1:
-                output_lines.append("")  # extra blank line after snippet
+                output_lines.append("")  # blank line 1
+                output_lines.append("")  # blank line 2
 
-        print(f"Writing file → {file_path}")
+        print(f"Writing file: {file_path}")
+
         with open(file_path, "w", encoding="utf-8") as outfile:
             outfile.write("\n".join(output_lines))
 
+# ============================================================
+# CLI
+# ============================================================
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Export ChatGPT conversation JSON → Markdown")
+    parser = argparse.ArgumentParser(description="Export ChatGPT JSON → Markdown")
     parser.add_argument("input_file", help="JSON export file")
-    parser.add_argument("output_dir", help="Directory to store generated Markdown")
-    parser.add_argument("--use-date-folders", action="store_true", help="Store files inside YYYY-MM-DD folders")
+    parser.add_argument("output_dir", help="Directory for Markdown output")
+    parser.add_argument("--use-date-folders", action="store_true")
 
     args = parser.parse_args()
     main(args.input_file, args.output_dir, args.use_date_folders)
